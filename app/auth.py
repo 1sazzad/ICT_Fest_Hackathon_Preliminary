@@ -2,8 +2,10 @@
 import hashlib
 import hmac
 import os
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
+
 
 import jwt
 from fastapi import Depends, Request
@@ -22,8 +24,11 @@ from .models import User
 # Access tokens presented to /auth/logout are recorded here so they can no
 # longer be used.
 _revoked_tokens: set[str] = set()
+_consumed_refresh_jtis: set[str] = set()
+_refresh_jti_lock = threading.Lock()
 
 _PBKDF2_ROUNDS = 100_000
+
 
 
 def hash_password(password: str) -> str:
@@ -47,7 +52,8 @@ def _now_ts() -> int:
 
 def create_access_token(user: User) -> str:
     iat = _now_ts()
-    lifetime = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES * 60)
+    lifetime = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+
     payload = {
         "sub": str(user.id),
         "org": user.org_id,
@@ -83,10 +89,23 @@ def decode_token(token: str) -> dict:
 
 
 def revoke_access_token(payload: dict) -> None:
-    _revoked_tokens.add(payload["jti"])
+    jti = payload.get("jti")
+    if not isinstance(jti, str) or not jti:
+        raise AppError(401, "UNAUTHORIZED", "Invalid or expired token")
+    _revoked_tokens.add(jti)
+
+
+
+def consume_refresh_jti(jti: str) -> bool:
+    with _refresh_jti_lock:
+        if jti in _consumed_refresh_jtis:
+            return False
+        _consumed_refresh_jtis.add(jti)
+        return True
 
 
 def get_token_payload(request: Request) -> dict:
+
     header = request.headers.get("Authorization")
     if not header or not header.startswith("Bearer "):
         raise AppError(401, "UNAUTHORIZED", "Missing bearer token")
@@ -94,19 +113,32 @@ def get_token_payload(request: Request) -> dict:
     payload = decode_token(token)
     if payload.get("type") != "access":
         raise AppError(401, "UNAUTHORIZED", "Wrong token type")
-    if payload.get("sub") in _revoked_tokens:
+
+    jti = payload.get("jti")
+    if not isinstance(jti, str) or not jti:
+        raise AppError(401, "UNAUTHORIZED", "Invalid or expired token")
+    if jti in _revoked_tokens:
         raise AppError(401, "UNAUTHORIZED", "Token has been revoked")
+
     return payload
+
 
 
 def get_current_user(
     payload: dict = Depends(get_token_payload),
     db: Session = Depends(get_db),
 ) -> User:
-    user = db.query(User).filter(User.id == int(payload["sub"])).first()
+    sub = payload.get("sub")
+    try:
+        user_id = int(sub)
+    except (TypeError, ValueError):
+        raise AppError(401, "UNAUTHORIZED", "Invalid or expired token")
+
+    user = db.query(User).filter(User.id == user_id).first()
     if user is None:
         raise AppError(401, "UNAUTHORIZED", "Unknown user")
     return user
+
 
 
 def require_admin(user: User = Depends(get_current_user)) -> User:

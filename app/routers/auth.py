@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from ..auth import (
+    consume_refresh_jti,
     create_access_token,
     create_refresh_token,
     decode_token,
@@ -11,6 +12,7 @@ from ..auth import (
     revoke_access_token,
     verify_password,
 )
+
 from ..database import get_db
 from ..errors import AppError
 from ..models import Organization, User
@@ -35,12 +37,8 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
         .first()
     )
     if existing is not None:
-        return {
-            "user_id": existing.id,
-            "org_id": org.id,
-            "username": existing.username,
-            "role": existing.role,
-        }
+        raise AppError(409, "USERNAME_TAKEN", "Username already exists in this organization")
+
 
     user = User(
         org_id=org.id,
@@ -83,7 +81,18 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)):
     data = decode_token(payload.refresh_token)
     if data.get("type") != "refresh":
         raise AppError(401, "UNAUTHORIZED", "Wrong token type")
-    user = db.query(User).filter(User.id == int(data["sub"])).first()
+
+    jti = data.get("jti")
+    if not isinstance(jti, str) or not jti or not consume_refresh_jti(jti):
+        raise AppError(401, "UNAUTHORIZED", "Invalid or expired token")
+
+    sub = data.get("sub")
+    try:
+        user_id = int(sub)
+    except (TypeError, ValueError):
+        raise AppError(401, "UNAUTHORIZED", "Invalid or expired token")
+
+    user = db.query(User).filter(User.id == user_id).first()
     if user is None:
         raise AppError(401, "UNAUTHORIZED", "Unknown user")
     return {
@@ -91,6 +100,8 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)):
         "refresh_token": create_refresh_token(user),
         "token_type": "bearer",
     }
+
+
 
 
 @router.post("/logout")

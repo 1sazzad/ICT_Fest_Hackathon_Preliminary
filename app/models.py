@@ -52,7 +52,8 @@ class Booking(Base):
     start_time = Column(DateTime, nullable=False, index=True)
     end_time = Column(DateTime, nullable=False)
     status = Column(String, nullable=False, default="confirmed")
-    reference_code = Column(String, nullable=False, index=True)
+    reference_code = Column(String, unique=True, nullable=False, index=True)
+
     price_cents = Column(Integer, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
@@ -61,8 +62,10 @@ class Booking(Base):
 
 class RefundLog(Base):
     __tablename__ = "refund_logs"
+    __table_args__ = (UniqueConstraint("booking_id", name="uq_refund_booking_id"),)
 
     id = Column(Integer, primary_key=True)
+
     booking_id = Column(Integer, ForeignKey("bookings.id"), nullable=False, index=True)
     amount_cents = Column(Integer, nullable=False)
     status = Column(String, nullable=False)
